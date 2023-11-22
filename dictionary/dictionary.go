@@ -3,78 +3,106 @@ package dictionary
 import (
 	"encoding/json"
 	"os"
+	"sync"
 )
 
-// Dictionary represents the application for managing words and definitions.
+// Dictionary représente l'application de gestion de mots et de définitions.
 type Dictionary struct {
 	fileName string
+	mu       sync.Mutex
+	entries  map[string]string
+	addCh    chan entryOperation
+	removeCh chan entryOperation
 }
 
-// NewDictionary creates a new instance of Dictionary with an associated file.
+// entryOperation représente une opération d'ajout ou de suppression.
+type entryOperation struct {
+	word       string
+	definition string
+}
+
+// NewDictionary crée une nouvelle instance de Dictionary avec un fichier associé.
 func NewDictionary(fileName string) *Dictionary {
-	return &Dictionary{fileName: fileName}
-}
-
-// Add adds a word and its definition to the file.
-func (d *Dictionary) Add(word, definition string) error {
-	entries, err := d.readFromFile()
-	if err != nil {
-		return err
+	dict := &Dictionary{
+		fileName: fileName,
+		entries:  make(map[string]string),
+		addCh:    make(chan entryOperation),
+		removeCh: make(chan entryOperation),
 	}
 
-	entries[word] = definition
+	// Lancer le worker pour traiter les opérations d'ajout et de suppression
+	go dict.entryWorker()
 
-	return d.writeToFile(entries)
+	return dict
 }
 
-// Get returns the definition of a specific word.
-func (d *Dictionary) Get(word string) (string, bool) {
-	entries, err := d.readFromFile()
-	if err != nil {
-		return "", false
+// entryWorker traite les opérations d'ajout et de suppression de manière concurrente.
+func (d *Dictionary) entryWorker() {
+	for {
+		select {
+		case entry := <-d.addCh:
+			d.add(entry.word, entry.definition)
+		case entry := <-d.removeCh:
+			d.remove(entry.word)
+		}
 	}
-
-	definition, found := entries[word]
-	return definition, found
 }
 
-// Remove removes a word from the file.
-func (d *Dictionary) Remove(word string) error {
-	entries, err := d.readFromFile()
-	if err != nil {
-		return err
-	}
-
-	delete(entries, word)
-
-	return d.writeToFile(entries)
+// Add ajoute un mot et sa définition au fichier de manière concurrente.
+func (d *Dictionary) Add(word, definition string) {
+	d.addCh <- entryOperation{word, definition}
 }
 
-// List returns a sorted list of words and their definitions.
+// Remove supprime un mot du fichier de manière concurrente.
+func (d *Dictionary) Remove(word string) {
+	d.removeCh <- entryOperation{word, ""}
+}
+
+// add ajoute un mot et sa définition à la map et écrit dans le fichier.
+func (d *Dictionary) add(word, definition string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	d.entries[word] = definition
+	d.writeToFile()
+}
+
+// remove supprime un mot de la map et écrit dans le fichier.
+func (d *Dictionary) remove(word string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	delete(d.entries, word)
+	d.writeToFile()
+}
+
+// List renvoie une liste triée des mots et de leurs définitions.
 func (d *Dictionary) List() (map[string]string, error) {
-	return d.readFromFile()
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	return d.entries, nil
 }
 
-// readFromFile reads the content from the file and converts it into a map.
-func (d *Dictionary) readFromFile() (map[string]string, error) {
+// readFromFile lit le contenu du fichier et le convertit en map.
+func (d *Dictionary) readFromFile() error {
 	file, err := os.Open(d.fileName)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer file.Close()
 
 	decoder := json.NewDecoder(file)
-	var entries map[string]string
-	err = decoder.Decode(&entries)
+	err = decoder.Decode(&d.entries)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	return entries, nil
+	return nil
 }
 
-// writeToFile takes a map and writes its content to the file.
-func (d *Dictionary) writeToFile(entries map[string]string) error {
+// writeToFile prend la map actuelle et écrit son contenu dans le fichier.
+func (d *Dictionary) writeToFile() error {
 	file, err := os.Create(d.fileName)
 	if err != nil {
 		return err
@@ -82,7 +110,7 @@ func (d *Dictionary) writeToFile(entries map[string]string) error {
 	defer file.Close()
 
 	encoder := json.NewEncoder(file)
-	err = encoder.Encode(entries)
+	err = encoder.Encode(d.entries)
 	if err != nil {
 		return err
 	}
